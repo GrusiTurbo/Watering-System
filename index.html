@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Garden watering system</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/5.10.1/mqtt.min.js"></script>
+<style>
+  :root{
+    --bg:#f4f6f5;
+    --card:#ffffff;
+    --text:#1f2a24;
+    --muted:#6b756f;
+    --accent:#2f9e6e;
+    --accent-dark:#1f6b4a;
+    --danger:#c0392b;
+    --track:#e3e7e4;
+    --radius:14px;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    background:var(--bg);
+    color:var(--text);
+    padding:20px 16px 60px;
+    max-width:480px;
+    margin-left:auto;
+    margin-right:auto;
+  }
+  h1{font-size:20px;font-weight:600;margin:0 0 4px;text-align:center;}
+  .subtitle{color:var(--muted);font-size:13px;margin:0 0 20px;}
+  .card{
+    background:var(--card);
+    border-radius:var(--radius);
+    padding:18px;
+    margin-bottom:16px;
+    box-shadow:0 1px 3px rgba(0,0,0,0.08);
+  }
+  .card h2{font-size:15px;margin:0 0 12px;font-weight:600;text-align:center;}
+  .row{display:flex;flex-direction:column;align-items:center;text-align:center;gap:4px;margin-bottom:10px;}
+  .row .label{font-size:13px;color:var(--muted);}
+  .row .value{font-size:28px;font-weight:700;}
+  .bar-track{background:var(--track);border-radius:999px;height:10px;overflow:hidden;margin-bottom:2px;}
+  .bar-fill{background:var(--accent);height:100%;width:0%;transition:width .4s ease;}
+  .pump-btn{
+    width:100%;
+    padding:14px;
+    border:none;
+    border-radius:12px;
+    font-size:16px;
+    font-weight:600;
+    cursor:pointer;
+    background:var(--accent);
+    color:#fff;
+  }
+  .pump-btn.on{background:var(--danger);}
+  .pump-btn:disabled{background:#b7bcb9;cursor:not-allowed;}
+  .status-dot{
+    display:inline-block;width:8px;height:8px;border-radius:50%;
+    background:var(--muted);margin-right:6px;
+  }
+  .status-dot.live{background:var(--accent);}
+  .wizard-step p{font-size:14px;line-height:1.5;margin-top:0;}
+  .wizard-btn{
+    padding:12px 18px;border:none;border-radius:10px;background:var(--accent-dark);
+    color:#fff;font-size:15px;cursor:pointer;width:100%;
+  }
+  .wizard-btn:disabled{background:#b7bcb9;cursor:not-allowed;}
+  .wizard-progress{font-size:12px;color:var(--muted);margin-bottom:10px;}
+  .link-btn{
+    background:none;border:none;color:var(--accent-dark);font-size:13px;
+    text-decoration:underline;cursor:pointer;padding:0;
+  }
+  .settings-row{
+    display:flex;gap:10px;align-items:flex-end;margin-top:14px;
+    padding-top:14px;border-top:1px solid var(--track);
+  }
+  .settings-field{flex:1;}
+  .settings-field label{
+    display:block;font-size:12px;color:var(--muted);margin-bottom:4px;
+  }
+  .settings-field input{
+    width:100%;padding:8px 10px;border:1px solid var(--track);border-radius:8px;
+    font-size:14px;color:var(--text);background:#fbfcfb;
+  }
+  .settings-save{
+    padding:8px 14px;border:none;border-radius:8px;background:var(--accent-dark);
+    color:#fff;font-size:13px;cursor:pointer;white-space:nowrap;
+  }
+  .settings-hint{font-size:11px;color:var(--muted);margin:6px 0 0;}
+</style>
+</head>
+<body>
+
+<h1>Garden watering system</h1>
+<p class="subtitle" style="text-align:center;"><span class="status-dot" id="liveDot"></span><span id="connText">Connecting...</span></p>
+
+<!-- ============ CALIBRATION WIZARD ============
+     Shown instead of the live cards until all four reference points
+     are saved on the ESP32. Each step publishes an MQTT command and
+     then waits for the device's next status message to confirm the
+     point was actually saved before moving on - there's no local
+     "assume it worked" step counter. -->
+<div class="card" id="wizardCard" style="display:none;">
+  <h2>Set up calibration</h2>
+  <div class="wizard-progress" id="wizardProgress"></div>
+
+  <div class="wizard-step" id="step-moisture_dry">
+    <p>Hold the soil sensor in the air (or fully dry soil), then lock in the dry reading.</p>
+    <button class="wizard-btn" onclick="calibrate('moisture_dry')">Lock in dry value</button>
+  </div>
+
+  <div class="wizard-step" id="step-moisture_wet" style="display:none;">
+    <p>Now put the soil sensor in water or fully soaked soil, then lock in the wet reading.</p>
+    <button class="wizard-btn" onclick="calibrate('moisture_wet')">Lock in wet value</button>
+  </div>
+
+  <div class="wizard-step" id="step-tank_empty" style="display:none;">
+    <p>Empty the tank so the float is at its lowest point, then lock in the low reading.</p>
+    <button class="wizard-btn" onclick="calibrate('tank_empty')">Lock in low value</button>
+  </div>
+
+  <div class="wizard-step" id="step-tank_full" style="display:none;">
+    <p>Fill the tank so the float is at its highest point, then lock in the high reading.</p>
+    <button class="wizard-btn" onclick="calibrate('tank_full')">Lock in high value</button>
+  </div>
+</div>
+
+<!-- ============ LIVE STATUS ============ -->
+<div class="card" id="tempCard" style="display:none;">
+  <h2>Soil temperature</h2>
+  <div class="row"><span class="label">Reading</span><span class="value" id="tempVal">--</span></div>
+</div>
+
+<div class="card" id="moistureCard" style="display:none;">
+  <h2>Soil moisture</h2>
+  <div class="row"><span class="label">Level</span><span class="value" id="moistureVal">--%</span></div>
+  <div class="bar-track"><div class="bar-fill" id="moistureBar"></div></div>
+
+  <div class="settings-row">
+    <div class="settings-field">
+      <label for="autoThresholdInput">Auto-water below (%)</label>
+      <input type="number" id="autoThresholdInput" min="0" max="100" step="1">
+    </div>
+    <div class="settings-field">
+      <label for="autoDurationInput">Run for (seconds)</label>
+      <input type="number" id="autoDurationInput" min="1" step="1">
+    </div>
+    <button class="settings-save" onclick="saveAutoWaterSettings()">Save</button>
+  </div>
+  <p class="settings-hint">Leave blank / 0 to keep watering manual only.</p>
+</div>
+
+<div class="card" id="tankCard" style="display:none;">
+  <h2>Tank level</h2>
+  <div class="row"><span class="label">Level</span><span class="value" id="tankVal">--%</span></div>
+  <div class="bar-track"><div class="bar-fill" id="tankBar"></div></div>
+</div>
+
+<div class="card" id="pumpCard" style="display:none;">
+  <h2>Pump</h2>
+  <button class="pump-btn" id="pumpBtn" onclick="togglePump()" disabled>Waiting for connection...</button>
+
+  <div class="settings-row">
+    <div class="settings-field">
+      <label for="pumpDurationInput">Run for (seconds)</label>
+      <input type="number" id="pumpDurationInput" min="1" step="1">
+    </div>
+    <button class="settings-save" onclick="savePumpDuration()">Save</button>
+  </div>
+  <p class="settings-hint">How long a manual "Turn pump ON" press runs before switching itself off.</p>
+</div>
+
+<div class="card" id="settingsCard" style="display:none;">
+  <button class="link-btn" onclick="calibrate('reset')">Recalibrate</button>
+</div>
+
+<script>
+/* ------------------------------------------------------------------
+   Fill these in from your HiveMQ Cloud cluster's Connection Details
+   page. This page connects over the WebSocket port (8884), not the
+   plain TLS port (8883) that the ESP32 firmware uses - a browser
+   can't open a raw TLS socket the way the ESP32 can, only WebSockets.
+-------------------------------------------------------------------*/
+const MQTT_HOST = "c86fd24d07a148399db8f355d3bf8d02.s1.eu.hivemq.cloud";
+const MQTT_WSS_PORT = 8884;
+const MQTT_USER = "Test1";      // same credential name as the firmware
+const MQTT_PASS = "DinMamma"; // same password as the firmware
+
+const TOPIC_STATUS  = "garden/status";
+const TOPIC_COMMAND = "garden/command";
+
+let pumpIsOn = false;
+let client = null;
+
+/* ------------------------------------------------------------------
+   "Connected" used to only mean "this browser has a live link to the
+   HiveMQ broker" - which stays true even if the ESP32 itself is
+   unplugged, since the broker in the cloud doesn't care. To actually
+   show whether the DEVICE is online, we track when its last status
+   message arrived and treat it as offline if none has shown up
+   recently (the ESP32 publishes roughly every 3s, so anything past
+   ~3x that is a real gap, not just normal timing jitter).
+-------------------------------------------------------------------*/
+const DEVICE_TIMEOUT_MS = 10000;
+let brokerConnected = false;
+let lastStatusAt = 0; // 0 = no status message received yet this session
+
+function updateConnectionIndicator() {
+  const dot = document.getElementById('liveDot');
+  const text = document.getElementById('connText');
+
+  if (!brokerConnected) {
+    text.textContent = 'Disconnected';
+    dot.classList.remove('live');
+    return;
+  }
+  if (lastStatusAt === 0) {
+    text.textContent = 'Waiting for device...';
+    dot.classList.remove('live');
+    return;
+  }
+  if (Date.now() - lastStatusAt > DEVICE_TIMEOUT_MS) {
+    text.textContent = 'Disconnected';
+    dot.classList.remove('live');
+    return;
+  }
+  text.textContent = 'Connected';
+  dot.classList.add('live');
+}
+
+function connect() {
+  const url = `wss://${MQTT_HOST}:${MQTT_WSS_PORT}/mqtt`;
+  client = mqtt.connect(url, {
+    username: MQTT_USER,
+    password: MQTT_PASS,
+    clientId: 'dashboard-' + Math.random().toString(16).slice(2),
+    reconnectPeriod: 2000
+  });
+
+  client.on('connect', () => {
+    brokerConnected = true;
+    document.getElementById('pumpBtn').disabled = false;
+    client.subscribe(TOPIC_STATUS);
+    updateConnectionIndicator();
+  });
+
+  client.on('reconnect', () => {
+    brokerConnected = false;
+    document.getElementById('connText').textContent = 'Reconnecting...';
+    document.getElementById('liveDot').classList.remove('live');
+  });
+
+  client.on('close', () => {
+    brokerConnected = false;
+    updateConnectionIndicator();
+  });
+
+  client.on('error', (err) => {
+    document.getElementById('connText').textContent = 'Connection error';
+    console.error('MQTT error:', err);
+  });
+
+  client.on('message', (topic, payloadBytes) => {
+    if (topic !== TOPIC_STATUS) return;
+    try {
+      const status = JSON.parse(payloadBytes.toString());
+      lastStatusAt = Date.now();
+      updateConnectionIndicator();
+      updateDashboard(status);
+    } catch (e) {
+      console.error('Bad status payload:', e);
+    }
+  });
+
+  // Catches the case where messages just stop arriving (ESP32 lost
+  // power/WiFi) without the browser's own broker link ever dropping.
+  setInterval(updateConnectionIndicator, 2000);
+}
+
+/* ------------------------------------------------------------------
+   Calibration wizard
+   Order: moisture dry -> moisture wet -> tank empty -> tank full.
+   Which step (if any) is shown is decided entirely from the
+   device's own status flags, so the wizard always reflects what's
+   actually saved on the ESP32 - not a local guess about whether the
+   last click worked.
+-------------------------------------------------------------------*/
+const wizardSteps = ['moisture_dry', 'moisture_wet', 'tank_empty', 'tank_full'];
+
+function currentWizardStep(status) {
+  if (!status.moistureDrySet) return 'moisture_dry';
+  if (!status.moistureWetSet) return 'moisture_wet';
+  if (!status.tankEmptySet)   return 'tank_empty';
+  if (!status.tankFullSet)    return 'tank_full';
+  return null; // fully calibrated
+}
+
+function calibrate(step) {
+  if (!client || !client.connected) return;
+  client.publish(TOPIC_COMMAND, JSON.stringify({ calibrate: step }));
+}
+
+/* ------------------------------------------------------------------
+   Pump
+   Turning it on no longer means "on until I turn it off" - the
+   ESP32 runs it for whatever "Run for (seconds)" is set to, then
+   switches itself off. Pressing the button again while it's running
+   still stops it immediately.
+-------------------------------------------------------------------*/
+function togglePump() {
+  if (!client || !client.connected) return;
+  const nextState = !pumpIsOn;
+  client.publish(TOPIC_COMMAND, JSON.stringify({ pump: nextState }));
+  // Don't flip pumpIsOn locally here - wait for the ESP32's next status
+  // message to confirm the change actually happened.
+}
+
+/* ------------------------------------------------------------------
+   Settings: manual run time + auto-watering threshold/duration
+   Saved to the ESP32's flash, so they survive reboots. Sent as a
+   single {"settings": {...}} command; the firmware only overwrites
+   whichever fields are actually included.
+-------------------------------------------------------------------*/
+/* ------------------------------------------------------------------
+   Editing guards
+   A status message arrives every few seconds regardless of what
+   you're doing in the settings boxes. Rather than tying that to a
+   single input's focus (which breaks the moment you tab from one
+   box to the next in the same group), each GROUP of boxes gets its
+   own flag: it's armed the instant you focus any box in the group,
+   and only released once you actually hit that group's Save button.
+   Until then, incoming status updates leave the whole group alone.
+-------------------------------------------------------------------*/
+let pumpDurationEditing = false;
+let autoWaterEditing = false;
+
+document.getElementById('pumpDurationInput').addEventListener('focus', () => {
+  pumpDurationEditing = true;
+});
+document.getElementById('autoThresholdInput').addEventListener('focus', () => {
+  autoWaterEditing = true;
+});
+document.getElementById('autoDurationInput').addEventListener('focus', () => {
+  autoWaterEditing = true;
+});
+
+function savePumpDuration() {
+  if (!client || !client.connected) return;
+  const seconds = parseInt(document.getElementById('pumpDurationInput').value, 10);
+  if (!seconds || seconds < 1) return;
+  client.publish(TOPIC_COMMAND, JSON.stringify({
+    settings: { pumpDurationSec: seconds }
+  }));
+  pumpDurationEditing = false;
+}
+
+function saveAutoWaterSettings() {
+  if (!client || !client.connected) return;
+  const threshold = parseInt(document.getElementById('autoThresholdInput').value, 10);
+  const duration = parseInt(document.getElementById('autoDurationInput').value, 10);
+  if (isNaN(threshold) || threshold < 0 || !duration || duration < 1) return;
+  client.publish(TOPIC_COMMAND, JSON.stringify({
+    settings: { autoThresholdPct: threshold, autoDurationSec: duration }
+  }));
+  autoWaterEditing = false;
+}
+
+/* ------------------------------------------------------------------
+   Render whatever the latest status message says
+-------------------------------------------------------------------*/
+function updateDashboard(status) {
+  const step = currentWizardStep(status);
+
+  if (step) {
+    document.getElementById('wizardCard').style.display = 'block';
+    document.getElementById('tempCard').style.display = 'none';
+    document.getElementById('moistureCard').style.display = 'none';
+    document.getElementById('tankCard').style.display = 'none';
+    document.getElementById('pumpCard').style.display = 'none';
+    document.getElementById('settingsCard').style.display = 'none';
+
+    wizardSteps.forEach(s => {
+      document.getElementById('step-' + s).style.display = (s === step) ? 'block' : 'none';
+    });
+    const stepNum = wizardSteps.indexOf(step) + 1;
+    document.getElementById('wizardProgress').textContent =
+      `Step ${stepNum} of ${wizardSteps.length}`;
+    return;
+  }
+
+  document.getElementById('wizardCard').style.display = 'none';
+  document.getElementById('tempCard').style.display = 'block';
+  document.getElementById('moistureCard').style.display = 'block';
+  document.getElementById('tankCard').style.display = 'block';
+  document.getElementById('pumpCard').style.display = 'block';
+  document.getElementById('settingsCard').style.display = 'block';
+
+  document.getElementById('tempVal').textContent = status.tempC.toFixed(1) + ' C';
+
+  document.getElementById('moistureVal').textContent = status.moisturePct + '%';
+  document.getElementById('moistureBar').style.width = status.moisturePct + '%';
+
+  document.getElementById('tankVal').textContent = status.tankPct + '%';
+  document.getElementById('tankBar').style.width = status.tankPct + '%';
+
+  pumpIsOn = status.pumpOn;
+  const btn = document.getElementById('pumpBtn');
+  btn.disabled = false;
+  btn.textContent = pumpIsOn ? 'Turn pump OFF' : 'Turn pump ON';
+  btn.classList.toggle('on', pumpIsOn);
+
+  if (!pumpDurationEditing) {
+    document.getElementById('pumpDurationInput').value =
+      (status.pumpDurationSec === null || status.pumpDurationSec === undefined) ? '' : status.pumpDurationSec;
+  }
+  if (!autoWaterEditing) {
+    document.getElementById('autoThresholdInput').value =
+      (status.autoThresholdPct === null || status.autoThresholdPct === undefined) ? '' : status.autoThresholdPct;
+    document.getElementById('autoDurationInput').value =
+      (status.autoDurationSec === null || status.autoDurationSec === undefined) ? '' : status.autoDurationSec;
+  }
+}
+
+connect();
+</script>
+</body>
+</html>
